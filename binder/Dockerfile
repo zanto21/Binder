@@ -8,21 +8,6 @@ ENV ROS_WS=${HOME}/workspace/ros
 # Examples:
 # RUN apt update && apt install -y curl
 # RUN pip install numpy
-#===========================================================#
-
-# Copy content to the image
-ENV REPO_DIR=${HOME}/work
-WORKDIR ${REPO_DIR}
-COPY --chown=${NB_USER}:users . ${REPO_DIR}/
-
-# Create a symbolic link to the ROS workspace under the working directory
-RUN ln -s ${ROS_WS} ${PWD}/ROS_WS
-
-# The entrypoint of the docker image
-COPY --chown=${NB_USER}:users binder/entrypoint.sh /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-
-
 # Install SWI Prolog 
 # Source: https://www.swi-prolog.org/build/PPA.html
 USER root
@@ -67,6 +52,23 @@ RUN mkdir -p ${JK_KERNEL} && \
     cp jupyter-knowrob/kernel.json ${JK_KERNEL}
 RUN cp -R ${HOME}/jupyter-knowrob/knowrob_cloud ${ROS_WS}/src/
 COPY --chown=${NB_USER}:users prolog /prolog
+
+#===========================================================#
+
+# Copy content to the image
+ENV REPO_DIR=${HOME}/work
+WORKDIR ${REPO_DIR}
+COPY --chown=${NB_USER}:users . ${REPO_DIR}/
+
+# Create a symbolic link to the ROS workspace under the working directory
+RUN ln -s ${ROS_WS} ${PWD}/ROS_WS
+
+# The entrypoint of the docker image
+COPY --chown=${NB_USER}:users binder/entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+
+
 
 # Build catkin workspace
 # Source: https://catkin-tools.readthedocs.io/en/latest/verbs/catkin_build.html
