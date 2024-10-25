@@ -77,12 +77,12 @@ WORKDIR ${ROS_WS}
 RUN catkin build
 
 # Download the example neem data
-USER root
-RUN mkdir /neem_data && chown ${NB_USER}:users /neem_data
-USER ${NB_USER}
-RUN cd /neem_data && \
-    wget https://seafile.zfn.uni-bremen.de/f/b66a71b257084d459b6c/?dl=1 -O example_neem.zip && \
-    unzip example_neem.zip && \
-    mv example_neem/* ./ && \
-    rm -r example_neem example_neem.zip
+#USER root
+#RUN mkdir /neem_data && chown ${NB_USER}:users /neem_data
+#USER ${NB_USER}
+#RUN cd /neem_data && \
+#    wget https://seafile.zfn.uni-bremen.de/f/b66a71b257084d459b6c/?dl=1 -O example_neem.zip && \
+#    unzip example_neem.zip && \
+#    mv example_neem/* ./ && \
+#    rm -r example_neem example_neem.zip
 #===========================================================#
