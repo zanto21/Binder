@@ -9,10 +9,10 @@ services:
     tty: true
     privileged: true
     # set group id of the host machine, so we can edit contents of the mounted volumes in the jupyterlab
-    user: "jovyan:${GID}"
+    #user: "jovyan:${GID}"
     # user: root
-    working_dir: /home/jovyan
-    entrypoint: /home/jovyan/work/binder/entrypoint.sh
+    working_dir: /home/EASE/Binder
+    entrypoint: /home/EASE/Binder/binder/entrypoint.sh
     command: jupyter lab --allow-root --NotebookApp.token='' --no-browser
     ports:
       - 8888:8888
@@ -20,5 +20,5 @@ services:
     #   - DISPLAY
     #   - QT_X11_NO_MITSHM=1
     volumes:
-      - ../:/home/jovyan/work:rw
+      - ../:/home//EASE/Binder:rw
       # - /tmp/.X11-unix:/tmp/.X11-unix:rw
