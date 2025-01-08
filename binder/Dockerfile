@@ -55,6 +55,12 @@ COPY --chown=${NB_USER}:users prolog /prolog
 
 #===========================================================#
 
+# Build catkin workspace
+# Source: https://catkin-tools.readthedocs.io/en/latest/verbs/catkin_build.html
+USER ${NB_USER}
+WORKDIR ${ROS_WS}
+RUN catkin build
+
 # Copy content to the image
 ENV REPO_DIR=${HOME}/work
 WORKDIR ${REPO_DIR}
@@ -70,11 +76,6 @@ ENTRYPOINT ["/entrypoint.sh"]
 
 
 
-# Build catkin workspace
-# Source: https://catkin-tools.readthedocs.io/en/latest/verbs/catkin_build.html
-USER ${NB_USER}
-WORKDIR ${ROS_WS}
-RUN catkin build
 
 # Download the example neem data
 #USER root
