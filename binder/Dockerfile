@@ -28,11 +28,12 @@ RUN apt update && apt install -y mongodb-org
 RUN mkdir -p /data/db && \
     chown -R ${NB_USER}:users /data/db 
 
+RUN echo "test"
 # Install Knowrob
 # Source: https://knowrob.github.io/knowrob/
 USER ${NB_USER}
 WORKDIR ${ROS_WS}/src
-RUN wstool merge https://raw.github.com/knowrob/knowrob/master/rosinstall/knowrob-base.rosinstall && \
+RUN wstool merge https://raw.github.com/zanto21/knowrob/master/rosinstall/knowrob-base.rosinstall && \
     wstool update
 
 # Switch to root user to install ROS dependencies
