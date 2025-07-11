@@ -11,10 +11,11 @@ roslaunch --wait rvizweb rvizweb.launch &
 MONGODB_URL=mongodb://127.0.0.1:27017
 mongod --fork --logpath ${HOME}/mongod.log
 
-export NEEMHUB_MONGO_PW=qEWRqc9UdN5TD7No7cjymUA8QEweNz
-export NEEMHUB_MONGO_DB=neems
-export NEEMHUB_MONGO_HOST='neem-3.informatik.uni-bremen.de'
-export NEEMHUB_MONGO_PORT=28015
+export KNOWROB_MONGO_USER=neemReader
+export KNOWROB_MONGO_PW=qEWRqc9UdN5TD7No7cjymUA8QEweNz
+export KNOWROB_MONGO_DB=neems
+export KNOWROB_MONGO_HOST='neem-3.informatik.uni-bremen.de'
+export KNOWROB_MONGO_PORT=28015
 
 # Create a symbolic link to the folder neem_data
 ln -s /neem_data ${PWD}/neem_data

@@ -1,10 +1,11 @@
 version: '3'
 services:
   binder-template:
+    network_mode: "host"
     image: binder-template:main
     build:
       context: ../
-      dockerfile: ./binder/Dockerfile
+      dockerfile: ./binder/Dockerfile  
     stdin_open: true
     tty: true
     privileged: true
