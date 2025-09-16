@@ -1,72 +1,114 @@
-from pymongo import MongoClient
-from IPython.display import display
+import subprocess, os, signal, time, traceback
 import ipywidgets as widgets
-from pprint import pprint
+from IPython.display import display, clear_output
+import rospy, json
+from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologFinish
 
-# Verbindung zur MongoDB (NEEM-Server)
-client = MongoClient("mongodb://neemReader:qEWRqc9UdN5TD7No7cjymUA8QEweNz@neem-3.informatik.uni-bremen.de:28015/neems")
-db = client["neems"]
-collection = db["62d5729bb3869a9a9c942f24_triples"]
+# Definiere Status-Codes
+STATUS_OK = 0
+STATUS_NO_SOLUTION = 1
+STATUS_QUERY_FAILED = 2
+# evtl. weitere Status-Codes wie:
+STATUS_META = 3
 
-def launch():
-    # UI-Elemente
-    description = widgets.HTML(
-        value="<b>MongoDB-Query als Dictionary eingeben (z.B. {'p': 'http://www.ontologydesignpatterns.org/ont/dul/DUL.owl#executesTask'}):</b>",
-        layout=widgets.Layout(margin='10px 0px 5px 0px')
-    )
+# Hilfsfunktion zum Starten eines Prozesses
+def start_proc(cmd, name):
+    print(f"→ Starte {name}: {' '.join(cmd)}")
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
 
-    query_input = widgets.Textarea(
-        value="{}",
-        placeholder="MongoDB-Query z. B. {'p': '...'}",
-        description='Query:',
-        layout=widgets.Layout(width='100%', height='80px')
-    )
+# Prozess-Handles global
+procs = []
 
-    run_button = widgets.Button(description="Run Query", button_style='success')
-    next_button = widgets.Button(description="Next Solution", button_style='info', disabled=True)
-    output_area = widgets.Output()
+# Starte ROS core und KnowRob (roslaunch)
+def init_ros_system():
+    global procs
+    if not any(p.poll() is None for p in procs):
+        procs = []
+        procs.append(start_proc(['roscore'], 'roscore'))
+        time.sleep(2)  # kurz warten, bis roscore läuft
+        procs.append(start_proc(['roslaunch', 'knowrob', 'openease-test.launch'], 'knowrob'))
 
-    # Interner Iterator
-    result_cursor = {'cursor': None}
+# Prolog-Query-Funktionen
+def call_query(q):
+    srv = rospy.ServiceProxy('/rosprolog/query', PrologQuery)
+    return srv(id='q1', query=q)
 
-    def run_query(_):
-        output_area.clear_output()
+def call_next():
+    srv = rospy.ServiceProxy('/rosprolog/next_solution', PrologNextSolution)
+    return srv(id='q1')
+
+def call_finish():
+    srv = rospy.ServiceProxy('/rosprolog/finish', PrologFinish)
+    return srv(id='q1')
+
+# Widgets definieren
+neem_input = widgets.Text(value='62d5729bb3869a9a9c942f24', description='NEEM-ID:')
+connect_btn = widgets.Button(description='Connect NEEM', button_style='info')
+query_input = widgets.Textarea(value="triple(Tsk, rdf:type, dul:'Action').", placeholder='Prolog-Query eingeben')
+run_btn = widgets.Button(description='Run Query', button_style='success', disabled=True)
+next_btn = widgets.Button(description='Next Solution', button_style='warning', disabled=True)
+output = widgets.Output()
+
+# Button-Handler
+def on_connect(_):
+    with output:
+        clear_output()
+        init_ros_system()
         try:
-            mongo_query = eval(query_input.value)
-            cursor = collection.find(mongo_query)
-            result_cursor['cursor'] = iter(cursor)
-            next_button.disabled = False
-
-            with output_area:
-                print(f"Abfrage gestartet:\n{mongo_query}")
+            rospy.init_node('next_gui', anonymous=True)
+            rospy.wait_for_service('/rosprolog/query', timeout=10)
+            call_query(f"knowrob_load_neem('{neem_input.value.strip()}')")
+            print("✅ NEEM geladen.")
+            run_btn.disabled = False
         except Exception as e:
-            with output_area:
-                print(f"❌ Fehler: {e}")
-            result_cursor['cursor'] = None
-            next_button.disabled = True
+            print("❌ Fehler beim Laden:", traceback.format_exc())
 
-    def next_solution(_):
-        if result_cursor['cursor'] is None:
-            return
-
+def on_run(_):
+    with output:
+        clear_output()
+        q = query_input.value.strip()
         try:
-            doc = next(result_cursor['cursor'])
-            with output_area:
-                pprint(doc)
-        except StopIteration:
-            with output_area:
-                print("✅ Keine weiteren Ergebnisse.")
-            next_button.disabled = True
+            call_query(q)
+            print("🔍 Query gestartet:", q)
+            next_btn.disabled = False
         except Exception as e:
-            with output_area:
-                print(f"❌ Fehler: {e}")
-            next_button.disabled = True
+            print("❌ Fehler beim Starten:", traceback.format_exc())
 
-    # Button-Events
-    run_button.on_click(run_query)
-    next_button.on_click(next_solution)
 
-    # Aufbau der UI
-    controls = widgets.HBox([run_button, next_button])
-    ui = widgets.VBox([description, query_input, controls, output_area])
-    display(ui)
+
+def on_next(_):
+    with output:
+        try:
+            res = call_next()
+            st = res.status
+            sol = json.loads(res.solution) if res.solution else {}
+
+            if st == STATUS_OK:
+                print("✅ Lösung:", sol)
+            elif st == STATUS_META:
+                print("✅ Lösung:", sol)
+            elif st == STATUS_NO_SOLUTION:
+                print("✅ Keine weiteren Lösungen.")
+                call_finish()
+                next_btn.disabled = True
+            elif st == STATUS_QUERY_FAILED:
+                print("❌ Query-Fehler:", sol)
+                call_finish()
+                next_btn.disabled = True
+            else:
+                print(f"❗ Unbekannter Status {st}:", sol)
+                call_finish()
+                next_btn.disabled = True
+
+        except Exception as e:
+            print("❌ Fehler beim `next`-Aufruf:", e)
+            next_btn.disabled = True
+
+# Buttons verbinden
+connect_btn.on_click(on_connect)
+run_btn.on_click(on_run)
+next_btn.on_click(on_next)
+
+# UI anzeigen
+ui = widgets.VBox([neem_input, connect_btn, query_input, widgets.HBox([run_btn, next_btn]), output])
+display(ui)
