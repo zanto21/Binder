@@ -1,295 +1,156 @@
-# Erforderliche Importe
-# Stellen Sie sicher, dass alle diese Bibliotheken in Ihrer Umgebung installiert sind.
-# rospy und die json_prolog_msgs müssen in Ihrer ROS-Umgebung verfügbar sein.
+# next.py
+import subprocess, os, time, traceback, uuid
 import ipywidgets as widgets
-from IPython.display import display
-from pprint import pprint
-import json
-import rospy
-import string
-import random
-import subprocess
-import os
-import time
+from IPython.display import display, clear_output
+import rospy, json
+from pymongo import MongoClient
+from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologFinish
 
-# WICHTIG: Die folgenden Importe setzen voraus, dass Ihr Jupyter-Notebook in einer
-# Umgebung läuft, in der ROS und die entsprechenden Message-Pakete verfügbar sind.
-# Wenn Sie diesen Code außerhalb einer Catkin-Workspace ausführen, müssen Sie
-# sicherstellen, dass die Python-Pfade korrekt gesetzt sind.
-from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologNextSolutionResponse, PrologFinish
+# --- Konfiguration ---
+MONGO_URI     = "mongodb://neemReader:qEWRqc9UdN5TD7No7cjymUA8QEweNz@neem-3.informatik.uni-bremen.de:28015/neems"
+MONGO_DB_NAME = "neems"
 
-# ==============================================================================
-# Klasse: KnowRobClient
-# Zweck: Kapselt die gesamte Kommunikation mit dem rosprolog-Service.
-# Dies macht den Hauptcode sauberer und einfacher zu verwalten.
-# ==============================================================================
-class KnowRobClient:
-    """
-    Ein Client zur Interaktion mit einem KnowRob-Prolog-Service über ROS.
-    """
-    def __init__(self, name_space='rosprolog'):
-        self.name_space = name_space
-        self.current_query_id = None
-        self._is_query_active = False
+# --- Status-Codes ---
+STATUS_NO_SOLUTION  = 0
+STATUS_WRONG_ID     = 1
+STATUS_QUERY_FAILED = 2
+STATUS_OK           = 3
 
-        # Initialisiert den ROS-Node. Ein eindeutiger Name verhindert Konflikte,
-        # wenn mehrere Notebooks gleichzeitig laufen.
-        try:
-            rospy.init_node('jupyter_knowrob_client', anonymous=True)
-            rospy.loginfo("ROS-Node 'jupyter_knowrob_client' initialisiert.")
-        except rospy.exceptions.ROSException:
-            rospy.logwarn("ROS-Node bereits initialisiert. Fahre fort.")
+# --- Globale Variablen ---
+current_query_id = None
+procs = []
 
-        # Einrichten der Service-Proxies für die Kommunikation mit rosprolog
-        self._query_srv = rospy.ServiceProxy(f'/{self.name_space}/query', PrologQuery)
-        self._next_solution_srv = rospy.ServiceProxy(f'/{self.name_space}/next_solution', PrologNextSolution)
-        self._finish_srv = rospy.ServiceProxy(f'/{self.name_space}/finish', PrologFinish)
-
-        # Warten, bis die ROS-Services verfügbar sind
-        rospy.loginfo("Warte auf rosprolog-Services...")
-        self._query_srv.wait_for_service(timeout=10.0)
-        self._next_solution_srv.wait_for_service(timeout=10.0)
-        self._finish_srv.wait_for_service(timeout=10.0)
-        rospy.loginfo("rosprolog-Services sind bereit.")
-
-    def _generate_id(self):
-        """Erzeugt eine eindeutige ID für jede Abfrage."""
-        timestamp = rospy.Time.now().to_nsec()
-        random_str = ''.join(random.choice(string.ascii_lowercase) for _ in range(5))
-        return f"jupyter_{timestamp}_{random_str}"
-
-    def start_query(self, query_string):
-        """
-        Startet eine neue Prolog-Abfrage.
-        Beendet jede vorherige, noch laufende Abfrage.
-        """
-        if self._is_query_active:
-            self.finish_query()
-
-        self.current_query_id = self._generate_id()
-        self._is_query_active = True
-        
-        try:
-            # Sendet die Abfrage an den Prolog-Service
-            self._query_srv(id=self.current_query_id, query=query_string)
-            rospy.loginfo(f"Abfrage gestartet mit ID: {self.current_query_id}")
-            return True
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Fehler beim Starten der Abfrage: {e}")
-            self._is_query_active = False
-            return False
-
-    def next_solution(self):
-        """
-        Holt die nächste verfügbare Lösung für die aktive Abfrage.
-        Gibt die Lösung als Dictionary zurück, oder None, wenn keine weiteren
-        Lösungen existieren oder ein Fehler auftritt.
-        """
-        if not self._is_query_active:
-            rospy.logwarn("Keine aktive Abfrage, um eine Lösung abzurufen.")
-            return None
-
-        try:
-            response = self._next_solution_srv(id=self.current_query_id)
-            
-            if response.status == PrologNextSolutionResponse.OK:
-                solution = json.loads(response.solution)
-                return solution if solution else {"result": "true"}
-            
-            elif response.status == PrologNextSolutionResponse.NO_SOLUTION:
-                rospy.loginfo("Keine weiteren Lösungen gefunden.")
-                self.finish_query()
-                return None
-            
-            else: # QUERY_FAILED oder WRONG_ID
-                rospy.logerr(f"Fehler bei der Abfrage: {response.solution}")
-                self.finish_query()
-                return None
-
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Service-Fehler beim Abrufen der nächsten Lösung: {e}")
-            self.finish_query()
-            return None
-
-    def finish_query(self):
-        """Informiert den Server, die aktive Abfrage zu beenden."""
-        if not self._is_query_active:
-            return
-            
-        try:
-            self._finish_srv(id=self.current_query_id)
-            rospy.loginfo(f"Abfrage beendet: {self.current_query_id}")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Fehler beim Beenden der Abfrage: {e}")
-        finally:
-            self._is_query_active = False
-            self.current_query_id = None
-
-
-# ==============================================================================
-# Funktion: launch_ui
-# Zweck: Erstellt und zeigt die ipywidgets-Benutzeroberfläche an.
-# ==============================================================================
-def launch_ui():
-    """
-    Startet die Benutzeroberfläche im Jupyter Notebook.
-    """
-    # Zustandsobjekt, um Client und Prozesse zu speichern
-    state = {'client': None, 'roscore_proc': None, 'knowrob_proc': None}
-
-    # --- Widgets für die Benutzeroberfläche ---
-    start_ros_button = widgets.Button(description="1. Start roscore & KnowRob", button_style='danger', layout=widgets.Layout(width='100%'))
-    connect_client_button = widgets.Button(description="2. Connect to KnowRob", button_style='warning', layout=widgets.Layout(width='100%'))
-    
-    neem_id_input = widgets.Text(value="62d5729bb3869a9a9c942f24", description="NEEM-ID:", layout=widgets.Layout(width='100%'))
-    
-    query_input = widgets.Textarea(
-        value="triple(Tsk, rdf:type, dul:'Action'), triple(Tsk, soma:hasExecutionState, State)",
-        placeholder="Geben Sie Ihre Prolog-Abfrage hier ein.",
-        layout=widgets.Layout(width='100%', height='100px')
-    )
-    run_button = widgets.Button(description="Run Query", button_style='success')
-    next_button = widgets.Button(description="Next Solution", button_style='info')
-    
-    output_area = widgets.Output()
-
-    # Alle Buttons außer dem ersten sind anfangs deaktiviert
-    connect_client_button.disabled = True
-    run_button.disabled = True
-    next_button.disabled = True
-
-    # --- Hilfsfunktion zum Starten von Prozessen ---
-    def start_process(command, process_key, log_name):
-        with output_area:
-            if state[process_key] and state[process_key].poll() is None:
-                print(f"ℹ️ {log_name}-Prozess scheint bereits zu laufen.")
-                return True
-            
-            print(f"→ Starte {log_name} mit Befehl: {' '.join(command)}")
-            try:
-                proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                state[process_key] = proc
-                return True
-            except FileNotFoundError:
-                print(f"❌ Fehler: '{command[0]}' wurde nicht gefunden. Stellen Sie sicher, dass Ihre ROS-Umgebung korrekt eingerichtet ist.")
-                return False
-            except Exception as e:
-                print(f"❌ Ein unerwarteter Fehler ist aufgetreten: {e}")
-                return False
-
-    # --- Callback-Funktionen für die Buttons ---
-    
-    def start_ros_system(_):
-        """Startet roscore und den rosprolog-Service über roslaunch."""
-        output_area.clear_output()
-        
-        # Starte roscore
-        if not start_process(['roscore'], 'roscore_proc', 'roscore'):
-            return
-        
-        with output_area:
-            print("Warte 2 Sekunden, bis roscore initialisiert ist...")
+# --- Hilfsfunktionen für ROS / KnowRob starten ---
+def start_ros_if_needed():
+    global procs
+    if not any(p.poll() is None for p in procs):
+        procs.append(subprocess.Popen(['roscore'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid))
         time.sleep(2)
+        procs.append(subprocess.Popen(['roslaunch','knowrob','openease-test.launch'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid))
+        time.sleep(5)
 
-        # Starte KnowRob
-        command = ["roslaunch", "knowrob", "knowrob.launch"]
-        if not start_process(command, 'knowrob_proc', 'KnowRob'):
+# --- Prolog-Service helper ---
+def call_query(q, qid=None):
+    if qid is None:
+        qid = "q_" + uuid.uuid4().hex[:6]
+    srv = rospy.ServiceProxy('/rosprolog/query', PrologQuery)
+    return srv(id=qid, query=q), qid
+
+def call_next(qid):
+    srv = rospy.ServiceProxy('/rosprolog/next_solution', PrologNextSolution)
+    return srv(id=qid)
+
+def call_finish(qid):
+    srv = rospy.ServiceProxy('/rosprolog/finish', PrologFinish)
+    return srv(id=qid)
+
+# --- UI Widgets ---
+neem_dropdown = widgets.Dropdown(options=[], description="NEEM:", layout=widgets.Layout(width='60%'))
+connect_btn   = widgets.Button(description="Connect & Load NEEM", button_style='info', layout=widgets.Layout(width='60%'))
+query_input   = widgets.Textarea(value="triple(Tsk, rdf:type, dul:'Action').", placeholder="Prolog-Query eingeben ...", layout=widgets.Layout(width='100%', height='80px'))
+run_btn       = widgets.Button(description="Run Query", button_style='success', disabled=True)
+next_btn      = widgets.Button(description="Next Solution", button_style='warning', disabled=True)
+output        = widgets.Output()
+
+# --- Mongo: vorhandene NEEM-IDs holen und Dropdown befüllen ---
+def refresh_neem_list():
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client[MONGO_DB_NAME]
+        cols = db.list_collection_names()
+        neem_ids = sorted({c[:-8] for c in cols if c.endswith("_triples")})
+        neem_dropdown.options = neem_ids
+    except Exception as e:
+        print("❌ Fehler beim Verbinden mit MongoDB:", e)
+
+refresh_neem_list()
+
+# --- Button-Callbacks ---
+def on_connect(_):
+    with output:
+        clear_output()
+        start_ros_if_needed()
+        try:
+            if not rospy.core.is_initialized():
+                rospy.init_node('neem_gui', anonymous=True)
+            rospy.wait_for_service('/rosprolog/query', timeout=10)
+            selected = neem_dropdown.value
+            if not selected:
+                print("⚠️ Keine NEEM ausgewählt.")
+                return
+            print(f"🔄 Lade NEEM: {selected}")
+            _, qid = call_query(f"knowrob_load_neem('{selected}')")
+            call_finish(qid)
+            print("✅ NEEM geladen:", selected)
+            run_btn.disabled = False
+        except Exception:
+            print("❌ Fehler beim Laden der NEEM:", traceback.format_exc())
+
+def on_run(_):
+    global current_query_id
+    with output:
+        clear_output()
+        q = query_input.value.strip()
+        if not q:
+            print("⚠️ Leere Query.")
             return
-        
-        with output_area:
-            print("✅ ROS-System gestartet. Bitte warten Sie ca. 10 Sekunden, bevor Sie auf 'Connect' klicken.")
-            connect_client_button.disabled = False
+        if not q.endswith('.'):
+            q += '.'
+        try:
+            res, qid = call_query(q)
+            current_query_id = qid
+            print("🔍 Query gestartet:", q)
+            next_btn.disabled = False
+        except Exception:
+            print("❌ Fehler beim Senden der Query:", traceback.format_exc())
+            next_btn.disabled = True
 
-
-    def connect_to_knowrob(_):
-        """Erstellt die Client-Instanz und verbindet sich mit KnowRob."""
-        with output_area:
-            output_area.clear_output()
-            print("Versuche, eine Verbindung zu den KnowRob-Services herzustellen...")
-            try:
-                state['client'] = KnowRobClient()
-                print("✅ Erfolgreich mit KnowRob verbunden.")
-                # Aktiviere die nächsten Schritte
-                run_button.disabled = False
-            except Exception as e:
-                print(f"❌ Verbindung fehlgeschlagen. Stellen Sie sicher, dass roscore und der KnowRob-Service laufen.\nDetails: {e}")
-
-    def run_query(_):
-        """
-        Konstruiert eine Abfrage mit dem NEEM-Kontext und führt sie aus.
-        """
-        if not state['client']: return
-        output_area.clear_output()
-        
-        neem_id = neem_id_input.value.strip()
-        # Entferne Leerzeichen und dann einen optionalen Punkt am Ende.
-        user_query = query_input.value.strip().rstrip('.')
-
-        if not neem_id:
-            with output_area: print("❌ Bitte geben Sie eine NEEM-ID an.")
+def on_next(_):
+    global current_query_id
+    with output:
+        if not current_query_id:
+            print("⚠️ Keine laufende Query.")
             return
-        if not user_query:
-            with output_area: print("❌ Bitte geben Sie eine Abfrage ein.")
-            return
-
-        collection_name = f"{neem_id}_triples"
-        
-        # Fallback auf 'in_graph/2', ein fundamentaleres Prädikat zum Abfragen
-        # von benannten Graphen.
-        final_query = f"in_graph('{collection_name}', ({user_query}))."
-
-        with output_area:
-            print(f"Starte Abfrage in Collection '{collection_name}':")
-            print(f"Sende Prolog-Abfrage: {final_query}")
-            
-            if state['client'].start_query(final_query):
-                print("Abfrage erfolgreich gesendet. Klicken Sie auf 'Next Solution'.")
-                next_button.disabled = False
+        try:
+            res = call_next(current_query_id)
+            st = res.status
+            sol_str = res.solution or ""
+            # Debug
+            # print(f"[DEBUG] status={st}, raw_solution='{sol_str}'")
+            # Falls keine textuelle Lösung oder leer
+            if st == STATUS_NO_SOLUTION or not sol_str.strip():
+                print("✅ Keine weiteren Lösungen.")
+                call_finish(current_query_id)
+                next_btn.disabled = True
+                current_query_id = None
+                return
+            if st == STATUS_OK:
+                sol = json.loads(sol_str)
+                print("✅ Lösung:", sol)
+            elif st == STATUS_QUERY_FAILED:
+                sol = sol_str
+                print("❌ Query fehlgeschlagen:", sol)
+                call_finish(current_query_id)
+                next_btn.disabled = True
+                current_query_id = None
             else:
-                print("❌ Fehler beim Starten der Abfrage.")
-                next_button.disabled = True
+                # evtl. andere Status-Codes
+                sol = sol_str
+                print(f"ℹ️ Unbekannter Status {st}:", sol)
+        except Exception:
+            print("❌ Fehler beim Next-Aufruf:", traceback.format_exc())
+            next_btn.disabled = True
 
-    def get_next_solution(_):
-        """Ruft die nächste Lösung von KnowRob ab und zeigt sie an."""
-        if not state['client']: return
-        with output_area:
-            solution = state['client'].next_solution()
-            if solution is not None:
-                print("\n--- Nächste Lösung ---")
-                pprint(solution)
-            else:
-                print("\n✅ Keine weiteren Lösungen oder Abfrage beendet.")
-                next_button.disabled = True
+# --- Buttons mit Callbacks verbinden ---
+connect_btn.on_click(on_connect)
+run_btn.on_click(on_run)
+next_btn.on_click(on_next)
 
-    # --- Buttons mit den Callback-Funktionen verbinden ---
-    start_ros_button.on_click(start_ros_system)
-    connect_client_button.on_click(connect_to_knowrob)
-    run_button.on_click(run_query)
-    next_button.on_click(get_next_solution)
-
-    # --- UI-Layout zusammenstellen und anzeigen ---
-    ui = widgets.VBox([
-        widgets.Label("Schritt 1: ROS-System starten (falls noch nicht geschehen)"),
-        start_ros_button,
-        widgets.HTML("<hr>"),
-        widgets.Label("Schritt 2: Mit dem KnowRob-Service verbinden"),
-        connect_client_button,
-        widgets.HTML("<hr>"),
-        widgets.Label("Schritt 3: Abfrage ausführen"),
-        widgets.Label("Geben Sie die NEEM-ID und die Prolog-Abfrage an."),
-        neem_id_input,
-        query_input,
-        widgets.HBox([run_button, next_button]),
-        widgets.HTML("<hr>"),
-        widgets.Label("Ausgabe:"),
-        output_area
-    ])
-    
-    display(ui)
-
-# --- Startpunkt ---
-# Rufen Sie diese Funktion in einer Zelle Ihres Jupyter-Notebooks auf,
-# um die Benutzeroberfläche zu starten.
-#
-# launch_ui()
-
+# --- UI anzeigen ---
+display(widgets.VBox([
+    neem_dropdown,
+    connect_btn,
+    query_input,
+    widgets.HBox([run_btn, next_btn]),
+    output
+]))

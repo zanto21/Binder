@@ -3,6 +3,7 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 import rospy, json
 from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologFinish
+import shutil, threading
 
 
 # Definiere Status-Codes
@@ -18,18 +19,83 @@ current_query_id = None  # speichert die aktuelle Query-ID
 
 # --- Prozesse starten ---
 def start_proc(cmd, name):
+    # Prüfe, ob das Programm existiert
+    if shutil.which(cmd[0]) is None:
+        print(f"⛔ Befehl nicht gefunden: {cmd[0]}")
+        return None
     print(f"→ Starte {name}: {' '.join(cmd)}")
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=os.setsid)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid,
+        text=True,
+        bufsize=1
+    )
+
+    # Stream stdout/stderr in das Notebook-Output, damit Pipes nicht volllaufen
+    def _stream(pipe, prefix):
+        try:
+            for line in iter(pipe.readline, ''):
+                if not line:
+                    break
+                with output:
+                    print(f"[{name} {prefix}] {line.rstrip()}")
+        except Exception:
+            pass
+
+    if proc.stdout:
+        threading.Thread(target=_stream, args=(proc.stdout, "OUT"), daemon=True).start()
+    if proc.stderr:
+        threading.Thread(target=_stream, args=(proc.stderr, "ERR"), daemon=True).start()
+    return proc
+
+def stop_procs():
+    global procs
+    for p in list(procs):
+        try:
+            if p and p.poll() is None:
+                print(f"→ Beende PID {p.pid}")
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                except Exception:
+                    p.terminate()
+                # optional: warte kurz und dann SIGKILL
+                time.sleep(0.5)
+                if p.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except Exception:
+                        p.kill()
+        except Exception:
+            pass
+    procs = []
 
 def init_ros_system():
     global procs
-    if not any(p.poll() is None for p in procs):
-        procs = []
-        procs.append(start_proc(['roscore'], 'roscore'))
+    # Wenn bereits lebende Prozesse in 'procs' sind, nichts tun
+    if any(p is not None and p.poll() is None for p in procs):
+        print("ℹ️ ROS-Prozesse bereits gestartet.")
+        return
+    # sauberen Neustart sicherstellen
+    stop_procs()
+    procs = []
+    r = start_proc(['roscore'], 'roscore')
+    if r:
+        procs.append(r)
+        # Warte, bis roscore hoch ist (vereinfachter Check)
         time.sleep(2)
-        procs.append(start_proc(['roslaunch', 'knowrob', 'openease-test.launch'], 'knowrob'))
+    else:
+        print("❌ roscore konnte nicht gestartet werden.")
+        return
+
+    k = start_proc(['roslaunch', 'knowrob', 'openease-test.launch'], 'knowrob')
+    if k:
+        procs.append(k)
         time.sleep(5)
         print("✅ ROS & KnowRob gestartet.")
+    else:
+        print("❌ knowrob konnte nicht gestartet werden.")
 
 # --- Prolog Service Wrapper ---
 def call_query(q, query_id):
@@ -101,7 +167,7 @@ def on_next(_):
             sol = json.loads(res.solution) if res.solution else {}
 
             if st == STATUS_OK:
-                print(json.dumps(sol, indent=2))
+                #print(json.dumps(sol, indent=2))
                 print("✅ Lösung:", sol)
             elif st == STATUS_NO_SOLUTION:
                 print("✅ Keine weiteren Lösungen.")
