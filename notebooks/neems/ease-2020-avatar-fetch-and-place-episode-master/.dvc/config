@@ -1,0 +1,4 @@
+[core]
+    remote = storage
+['remote "storage"']
+    url = hdfs://hadoop@134.102.137.65:9000/neems/ease-20-avatar-fetch-and-place-episode/
