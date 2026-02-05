@@ -1,201 +1,212 @@
-import subprocess, os, signal, time, traceback, uuid
+import os, json, uuid, traceback, subprocess, time
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-import rospy, json
-from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologFinish
-import shutil, threading
 
+# --- ROS / KnowRob Imports ---
+try:
+    import rospy
+    from json_prolog_msgs.srv import PrologQuery, PrologNextSolution, PrologFinish
+    from json_prolog_msgs.srv import PrologNextSolutionResponse
+    ROS_AVAILABLE = True
+except ImportError:
+    ROS_AVAILABLE = False
 
-# Definiere Status-Codes
-STATUS_NO_SOLUTION = 0
-STATUS_WRONG_ID = 1
-STATUS_QUERY_FAILED = 2
-STATUS_OK = 3
+# --- Pfade ---
+NEEM_BASE_PATH = "/home/jovyan/work/notebooks/neems"
 
+# --- UI Elemente ---
+neem_dropdown = widgets.Dropdown(
+    description="NEEM auswählen:", 
+    style={'description_width':'initial'},
+    layout=widgets.Layout(width="450px")
+)
+refresh_btn = widgets.Button(description="Aktualisieren", icon="refresh")
 
-# Prozess-Handles
-procs = []
-current_query_id = None  # speichert die aktuelle Query-ID
+query_input = widgets.Textarea(
+    value="triple(A, P, O).",
+    placeholder="Prolog Query hier eingeben...",
+    layout=widgets.Layout(width="100%", height="120px")
+)
 
-# --- Prozesse starten ---
-def start_proc(cmd, name):
-    # Prüfe, ob das Programm existiert
-    if shutil.which(cmd[0]) is None:
-        print(f"⛔ Befehl nicht gefunden: {cmd[0]}")
-        return None
-    print(f"→ Starte {name}: {' '.join(cmd)}")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-        text=True,
-        bufsize=1
-    )
+run_btn = widgets.Button(description="Query ausführen", button_style='success', icon="play")
+next_btn = widgets.Button(description="Nächste Lösung", button_style='warning', icon="forward")
+connect_btn = widgets.Button(description="1. Diagnose & Connect", button_style="info", icon="wrench", layout=widgets.Layout(width="280px"))
+import_btn = widgets.Button(description="2. Full Reset Import", button_style="danger", icon="sync", layout=widgets.Layout(width="280px"))
 
-    # Stream stdout/stderr in das Notebook-Output, damit Pipes nicht volllaufen
-    def _stream(pipe, prefix):
-        try:
-            for line in iter(pipe.readline, ''):
-                if not line:
-                    break
-                with output:
-                    print(f"[{name} {prefix}] {line.rstrip()}")
-        except Exception:
-            pass
+output = widgets.Output(layout={'border': '1px solid #ddd', 'height': '450px', 'overflow_y': 'scroll'})
 
-    if proc.stdout:
-        threading.Thread(target=_stream, args=(proc.stdout, "OUT"), daemon=True).start()
-    if proc.stderr:
-        threading.Thread(target=_stream, args=(proc.stderr, "ERR"), daemon=True).start()
-    return proc
-
-def stop_procs():
-    global procs
-    for p in list(procs):
-        try:
-            if p and p.poll() is None:
-                print(f"→ Beende PID {p.pid}")
-                try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                except Exception:
-                    p.terminate()
-                # optional: warte kurz und dann SIGKILL
-                time.sleep(0.5)
-                if p.poll() is None:
-                    try:
-                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                    except Exception:
-                        p.kill()
-        except Exception:
-            pass
-    procs = []
-
-def init_ros_system():
-    global procs
-    # Wenn bereits lebende Prozesse in 'procs' sind, nichts tun
-    if any(p is not None and p.poll() is None for p in procs):
-        print("ℹ️ ROS-Prozesse bereits gestartet.")
-        return
-    # sauberen Neustart sicherstellen
-    stop_procs()
-    procs = []
-    r = start_proc(['roscore'], 'roscore')
-    if r:
-        procs.append(r)
-        # Warte, bis roscore hoch ist (vereinfachter Check)
-        time.sleep(2)
-    else:
-        print("❌ roscore konnte nicht gestartet werden.")
-        return
-
-    k = start_proc(['roslaunch', 'knowrob', 'openease-test.launch'], 'knowrob')
-    if k:
-        procs.append(k)
-        time.sleep(5)
-        print("✅ ROS & KnowRob gestartet.")
-    else:
-        print("❌ knowrob konnte nicht gestartet werden.")
-
-# --- Prolog Service Wrapper ---
-def call_query(q, query_id):
-    srv = rospy.ServiceProxy('/rosprolog/query', PrologQuery)
-    return srv(id=query_id, query=q)
-
-def call_next(query_id):
-    srv = rospy.ServiceProxy('/rosprolog/next_solution', PrologNextSolution)
-    return srv(id=query_id)
-
-def call_finish(query_id):
-    srv = rospy.ServiceProxy('/rosprolog/finish', PrologFinish)
-    return srv(id=query_id)
-
-# --- Widgets ---
-neem_input = widgets.Text(value='62d5729bb3869a9a9c942f24', description='NEEM-ID:')
-connect_btn = widgets.Button(description='Connect NEEM', button_style='info')
-query_input = widgets.Textarea(value="triple(Tsk, rdf:type, dul:'Action').", placeholder='Prolog-Query eingeben')
-run_btn = widgets.Button(description='Run Query', button_style='success', disabled=True)
-next_btn = widgets.Button(description='Next Solution', button_style='warning', disabled=True)
-output = widgets.Output()
-
-# --- Handlers ---
-def on_connect(_):
-    with output:
-        clear_output()
-        init_ros_system()
-        try:
-            if not rospy.core.is_initialized():
-                rospy.init_node('next_gui', anonymous=True)
-            rospy.wait_for_service('/rosprolog/query', timeout=10)
-            neem = neem_input.value.strip()
-            q = f"knowrob_load_neem('{neem}')"
-            query_id = "connect_" + uuid.uuid4().hex[:6]
-            call_query(q, query_id)
-            call_finish(query_id)
-            print(f"✅ NEEM {neem} erfolgreich geladen.")
-            run_btn.disabled = False
-        except Exception as e:
-            print("❌ Fehler beim Laden:", traceback.format_exc())
-
-def on_run(_):
-    global current_query_id
-    with output:
-        clear_output()
-        q = query_input.value.strip()
-        if not q.endswith('.'):
-            q += '.'
-        try:
-            # Alte Query schließen, falls offen
-            if current_query_id:
-                call_finish(current_query_id)
-            current_query_id = "q_" + uuid.uuid4().hex[:6]
-            call_query(q, current_query_id)
-            print(f"🔍 Query gestartet (ID={current_query_id}): {q}")
-            next_btn.disabled = False
-        except Exception as e:
-            print("❌ Fehler beim Starten:", traceback.format_exc())
-
-def on_next(_):
-    global current_query_id
-    with output:
-        try:
-            if not current_query_id:
-                print("⚠️ Keine aktive Query.")
-                return
-            res = call_next(current_query_id)
-            st = res.status
-            sol = json.loads(res.solution) if res.solution else {}
-
-            if st == STATUS_OK:
-                #print(json.dumps(sol, indent=2))
-                print("✅ Lösung:", sol)
-            elif st == STATUS_NO_SOLUTION:
-                print("✅ Keine weiteren Lösungen.")
-                call_finish(current_query_id)
-                next_btn.disabled = True
-                current_query_id = None
-            elif st == STATUS_QUERY_FAILED:
-                print("❌ Query fehlgeschlagen:", sol)
-                call_finish(current_query_id)
-                next_btn.disabled = True
-                current_query_id = None
-            else:
-                print(f"ℹ️ Unbekannter Status {st}:", sol)
-        except Exception as e:
-            print("❌ Fehler beim Next-Aufruf:", e)
-            next_btn.disabled = True
-
-# --- Button Events ---
-connect_btn.on_click(on_connect)
-run_btn.on_click(on_run)
-next_btn.on_click(on_next)
-
-# --- UI anzeigen ---
+# Layout
+header = widgets.HTML("<h2>KnowRob NEEM Explorer (Fix: Compound Type Error)</h2>")
 ui = widgets.VBox([
-    neem_input,
-    connect_btn,
-    query_input,
-    widgets.HBox([run_btn, next_btn]),
-    output
+    header, 
+    widgets.VBox([
+        widgets.HBox([neem_dropdown, refresh_btn]),
+        widgets.HBox([connect_btn, import_btn]),
+        widgets.HTML("<br><b>Prolog Query:</b>"),
+        query_input,
+        widgets.HBox([run_btn, next_btn]),
+        output
+    ])
 ])
 display(ui)
+
+# -----------------------------------------------------------------------------
+# — Globale Variable für Query-Management
+# -----------------------------------------------------------------------------
+current_query_id = None
+
+# -----------------------------------------------------------------------------
+# — Hilfsfunktionen
+# -----------------------------------------------------------------------------
+
+def get_prolog_service(srv_name, srv_type):
+    try:
+        rospy.wait_for_service(srv_name, timeout=2.0)
+        return rospy.ServiceProxy(srv_name, srv_type)
+    except: return None
+
+def run_simple_query(query_str):
+    srv = get_prolog_service('/rosprolog/query', PrologQuery)
+    if not srv: return None
+    q_id = "q_" + uuid.uuid4().hex[:4]
+    try:
+        if not query_str.endswith('.'): query_str += '.'
+        srv(id=q_id, query=query_str)
+        next_srv = get_prolog_service('/rosprolog/next_solution', PrologNextSolution)
+        res = next_srv(id=q_id)
+        get_prolog_service('/rosprolog/finish', PrologFinish)(id=q_id)
+        return res
+    except: return None
+
+def format_term(term):
+    if isinstance(term, dict) and 'term' in term:
+        val = term['term']
+        if isinstance(val, list) and len(val) > 1: return str(val[1])
+    elif isinstance(term, list) and len(term) > 1: return str(term[1])
+    return str(term)
+
+# -----------------------------------------------------------------------------
+# — Callbacks
+# -----------------------------------------------------------------------------
+
+def on_import_clicked(_):
+    with output:
+        clear_output()
+        target_neem = neem_dropdown.value
+        if not target_neem: 
+            print("Bitte zuerst einen NEEM auswählen.")
+            return
+        
+        roslog_path = os.path.join(NEEM_BASE_PATH, target_neem, "data", "triples", "roslog")
+        if not os.path.exists(roslog_path):
+             roslog_path = os.path.join(NEEM_BASE_PATH, target_neem, "data", "triples")
+        
+        print(f"Bereinige Datenbank 'neems'...")
+        subprocess.call(["mongo", "neems", "--eval", "db.dropDatabase()"])
+        
+        print(f"Importiere NEEM...")
+        try:
+            subprocess.check_call(["mongorestore", "--host", "127.0.0.1", "-d", "neems", "--dir", roslog_path])
+            subprocess.call(["mongo", "neems", "--eval", "if(db.roslog.exists()){ db.roslog.renameCollection('triples') }"])
+            print(f"Import erfolgreich.")
+        except Exception as e: print(f"Fehler: {e}")
+
+def on_connect_clicked(_):
+    with output:
+        clear_output()
+        if not rospy.core.is_initialized():
+            rospy.init_node('neem_local_ui', anonymous=True)
+        
+        print("Initialisiere KnowRob & Präfix-Handler...")
+        run_simple_query("ensure_loaded(library('knowrob'))")
+        run_simple_query("mng_db_name('neems')")
+        
+        # Namespaces registrieren
+        namespaces = {
+            'dul':  'http://www.ontologydesignpatterns.org/ont/dul/DUL.owl#',
+            'soma': 'http://www.ease-crc.org/ont/SOMA.owl#',
+            'owl':  'http://www.w3.org/2002/07/owl#',
+            'rdf':  'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+            'rdfs': 'http://www.w3.org/2000/01/rdf-schema#',
+            'knowrob': 'http://knowrob.org/kb/knowrob.owl#'
+        }
+        for prefix, uri in namespaces.items():
+            run_simple_query(f"rdf_db:rdf_register_ns({prefix}, '{uri}')")
+        
+        # URI-Helper: Wandelt Präfix-Strukturen sicher in Atome um
+        # Wichtig: atom(In) deckt bereits existierende URIs ab.
+        # Prefix:Name wird explizit aufgelöst und mit atom_concat zu einem flachen Atom verbunden.
+        uri_helper = (
+            "assertz(( ensure_uri(In, Out) :- "
+            "  (atom(In) -> Out = In ; "
+            "  (compound(In), In = Prefix:Name -> "
+            "    (rdf_current_ns(Prefix, NS), atom_concat(NS, Name, Out)) ; "
+            "    Out = In)) ))"
+        )
+        run_simple_query("retractall(ensure_uri(_,_))")
+        run_simple_query(uri_helper)
+        
+        # Die Brücke nutzt mng_find. 
+        # Das Problem war, dass S_U, P_U oder O_U manchmal noch Compounds waren.
+        # Wir erzwingen hier die Auflösung.
+        triple_bridge = (
+            "assertz(( triple(S,P,O) :- "
+            "  (nonvar(S) -> (ensure_uri(S, S_U), S_Q = [s, S_U]) ; S_Q = []), "
+            "  (nonvar(P) -> (ensure_uri(P, P_U), P_Q = [p, P_U]) ; P_Q = []), "
+            "  (nonvar(O) -> (ensure_uri(O, O_U), O_Q = [o, O_U]) ; O_Q = []), "
+            "  append([S_Q, P_Q, O_Q], QueryList), "
+            "  mng_client:mng_find(neems, triples, QueryList, Doc), "
+            "  mng_client:mng_get_dict('s', Doc, S), "
+            "  mng_client:mng_get_dict('p', Doc, P), "
+            "  mng_client:mng_get_dict('o', Doc, O) ))"
+        )
+        
+        run_simple_query("retractall(triple(_,_,_))")
+        run_simple_query(triple_bridge)
+        run_simple_query("retractall(has_type(_,_))")
+        run_simple_query("assertz(( has_type(S, T) :- triple(S, rdf:type, T) ))")
+        
+        print("Verbindung bereit. Präfix-Abfragen sind jetzt stabil.")
+
+def on_run_query(_):
+    global current_query_id
+    with output:
+        clear_output()
+        query_str = query_input.value.strip().rstrip('.')
+        print(f"Abfrage: {query_str}")
+        try:
+            if current_query_id:
+                get_prolog_service('/rosprolog/finish', PrologFinish)(id=current_query_id)
+            current_query_id = "q_" + uuid.uuid4().hex[:4]
+            srv = get_prolog_service('/rosprolog/query', PrologQuery)
+            if srv:
+                srv(id=current_query_id, query=f"{query_str}.")
+                on_next_solution(None)
+        except Exception as e: print(f" Fehler: {e}")
+
+def on_next_solution(_):
+    global current_query_id
+    with output:
+        if not current_query_id: return
+        srv = get_prolog_service('/rosprolog/next_solution', PrologNextSolution)
+        res = srv(id=current_query_id)
+        if res and res.status == 3:
+            sol = json.loads(res.solution)
+            if not sol: print("true.")
+            else:
+                for k, v in sol.items(): print(f"   {k} = {format_term(v)}")
+        elif res and res.status == 0:
+            print("Keine weiteren Lösungen.")
+            current_query_id = None
+
+def refresh_neems(_=None):
+    if os.path.exists(NEEM_BASE_PATH):
+        dirs = [d for d in os.listdir(NEEM_BASE_PATH) if os.path.isdir(os.path.join(NEEM_BASE_PATH, d))]
+        neem_dropdown.options = sorted(dirs)
+
+refresh_btn.on_click(refresh_neems)
+connect_btn.on_click(on_connect_clicked)
+import_btn.on_click(on_import_clicked)
+run_btn.on_click(on_run_query)
+next_btn.on_click(on_next_solution)
+refresh_neems()

@@ -27,7 +27,6 @@ RUN echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${
 RUN apt update && apt install -y mongodb-org
 RUN mkdir -p /data/db && \
     chown -R ${NB_USER}:users /data/db 
-
 RUN echo "test"
 # Install Knowrob
 # Source: https://knowrob.github.io/knowrob/
